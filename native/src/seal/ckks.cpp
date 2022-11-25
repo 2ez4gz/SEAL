@@ -110,7 +110,7 @@ namespace seal
         int coeff_bit_count = static_cast<int>(log2(fabs(value))) + 2;
         if (coeff_bit_count >= context_data.total_coeff_modulus_bit_count())
         {
-            throw invalid_argument("encoded value is too large");
+            // throw invalid_argument("encoded value is too large");
         }
 
         double two_pow_64 = pow(2.0, 64);
@@ -237,7 +237,7 @@ namespace seal
         int coeff_bit_count = get_significant_bit_count(static_cast<uint64_t>(llabs(value))) + 2;
         if (coeff_bit_count >= context_data.total_coeff_modulus_bit_count())
         {
-            throw invalid_argument("encoded value is too large");
+            // throw invalid_argument("encoded value is too large");
         }
 
         // Resize destination to appropriate size

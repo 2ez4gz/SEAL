@@ -82,7 +82,9 @@ else()
 endif()
 
 # Required files and directories
-include(GNUInstallDirs)
+if (NOT CMAKE_INSTALL_LIBDIR OR NOT CMAKE_INSTALL_INCLUDEDIR)
+    include(GNUInstallDirs)
+endif()
 
 # Runtime path setup
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")

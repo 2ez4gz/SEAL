@@ -512,7 +512,7 @@ namespace seal
             int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max<>(max_coeff, 1.0)))) + 1;
             if (max_coeff_bit_count >= context_data.total_coeff_modulus_bit_count())
             {
-                throw std::invalid_argument("encoded values are too large");
+                // throw std::invalid_argument("encoded values are too large");
             }
 
             double two_pow_64 = std::pow(2.0, 64);
