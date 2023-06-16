@@ -403,6 +403,39 @@ namespace seal
             destination.resize(slots_);
             decode_internal(plain, destination.data(), std::move(pool));
         }
+
+        template <
+            typename T, typename = std::enable_if_t<
+                            std::is_same<std::remove_cv_t<T>, double>::value ||
+                            std::is_same<std::remove_cv_t<T>, std::complex<double>>::value>>
+        inline void extract_vec2plaintext(
+            const Plaintext &plain, std::vector<T> &destination, MemoryPoolHandle pool = MemoryManager::GetPool())
+        {
+            destination.resize(slots_);
+            extract_vec2plaintext_internal(plain, destination.data(), std::move(pool));
+        }
+
+        template <
+            typename T, typename = std::enable_if_t<
+                            std::is_same<std::remove_cv_t<T>, double>::value ||
+                            std::is_same<std::remove_cv_t<T>, std::complex<double>>::value>>
+        inline void embed_vec2plaintext(
+            const std::vector<T> &values, double scale, Plaintext &destination,
+            MemoryPoolHandle pool = MemoryManager::GetPool())
+        {
+            embed_vec2plaintext(values, context_.first_parms_id(), scale, destination, std::move(pool));
+        }
+
+        template <
+            typename T, typename = std::enable_if_t<
+                            std::is_same<std::remove_cv_t<T>, double>::value ||
+                            std::is_same<std::remove_cv_t<T>, std::complex<double>>::value>>
+        inline void embed_vec2plaintext(
+            const std::vector<T> &values, parms_id_type parms_id, double scale, Plaintext &destination,
+            MemoryPoolHandle pool = MemoryManager::GetPool())
+        {
+            embed_vec2plaintext_internal(values.data(), values.size(), parms_id, scale, destination, std::move(pool));
+        }
 #ifdef SEAL_USE_MSGSL
         /**
         Decodes a plaintext polynomial into double-precision floating-point
@@ -441,6 +474,256 @@ namespace seal
         }
 
     private:
+        template <
+            typename T, typename = std::enable_if_t<
+                            std::is_same<std::remove_cv_t<T>, double>::value ||
+                            std::is_same<std::remove_cv_t<T>, std::complex<double>>::value>>
+        void embed_vec2plaintext_internal(
+            const T *values, std::size_t values_size, parms_id_type parms_id, double scale, Plaintext &destination,
+            MemoryPoolHandle pool)
+        {
+            auto context_data_ptr = context_.get_context_data(parms_id);
+            if (!context_data_ptr)
+            {
+                throw std::invalid_argument("parms_id is not valid for encryption parameters");
+            }
+            if (!values && values_size > 0)
+            {
+                throw std::invalid_argument("values cannot be null");
+            }
+            if (values_size > slots_)
+            {
+                throw std::invalid_argument("values_size is too large");
+            }
+            if (!pool)
+            {
+                throw std::invalid_argument("pool is uninitialized");
+            }
+
+            auto &context_data = *context_data_ptr;
+            auto &parms = context_data.parms();
+            auto &coeff_modulus = parms.coeff_modulus();
+            std::size_t coeff_modulus_size = coeff_modulus.size();
+            std::size_t coeff_count = parms.poly_modulus_degree();
+            // Quick sanity check
+            if (!util::product_fits_in(coeff_modulus_size, coeff_count))
+            {
+                throw std::logic_error("invalid parameters");
+            }
+
+            // Check that scale is positive and not too large
+            if (scale <= 0 || (static_cast<int>(log2(scale)) + 1 >= context_data.total_coeff_modulus_bit_count()))
+            {
+                throw std::invalid_argument("scale out of bounds");
+            }
+            // values_size is guaranteed to be no bigger than slots_
+            std::size_t n = util::mul_safe(slots_, std::size_t(2));
+
+            auto conj_values = util::allocate<std::complex<double>>(n, pool, 0);
+
+            auto ntt_tables = context_data.small_ntt_tables();
+            double fix = scale / static_cast<double>(n);
+            for (std::size_t i = 0; i < values_size; i++)
+            {
+                conj_values[matrix_reps_index_map_[i]] = complex_arith_.mul_scalar(values[i], fix);
+                conj_values[matrix_reps_index_map_[i + slots_]] = complex_arith_.mul_scalar(std::conj(values[i]), fix);
+            }
+
+            double max_coeff = 0;
+            for (std::size_t i = 0; i < n; i++)
+            {
+                max_coeff = std::max<>(max_coeff, std::fabs(conj_values[i].real()));
+            }
+            int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max<>(max_coeff, 1.0)))) + 1;
+            if (max_coeff_bit_count >= context_data.total_coeff_modulus_bit_count())
+            {
+                throw std::invalid_argument("encoded values are too large");
+            }
+
+            // Resize destination to appropriate size
+            // Need to first set parms_id to zero, otherwise resize
+            // will throw an exception.
+            destination.parms_id() = parms_id_zero;
+            destination.resize(util::mul_safe(coeff_count, coeff_modulus_size));
+            if (max_coeff_bit_count <= 64)
+            {
+                for (std::size_t i = 0; i < n; i++)
+                {
+                    double coeffd = std::round(conj_values[i].real());
+                    bool is_negative = std::signbit(coeffd);
+
+                    std::uint64_t coeffu = static_cast<std::uint64_t>(std::fabs(coeffd));
+
+                    if (is_negative)
+                    {
+                        for (std::size_t j = 0; j < coeff_modulus_size; j++)
+                        {
+                            destination[i + (j * coeff_count)] = util::negate_uint_mod(
+                                util::barrett_reduce_64(coeffu, coeff_modulus[j]), coeff_modulus[j]);
+                        }
+                    }
+                    else
+                    {
+                        for (std::size_t j = 0; j < coeff_modulus_size; j++)
+                        {
+                            destination[i + (j * coeff_count)] = util::barrett_reduce_64(coeffu, coeff_modulus[j]);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // TODO: if max_coeff_bit_count > 64
+            }
+            std::cout << "Before transforme to NTT domain:" << std::endl;
+            for (size_t i = 0; i < n; i++)
+            {
+                if (destination[i] != 0)
+                {
+                    std::stringstream hex_stream;
+                    hex_stream << std::hex << destination[i];
+                    std::cout << "Coefficient " << i << ": " << hex_stream.str() << std::endl;
+                }
+            }
+            std::cout << std::endl;
+            // Transform to NTT domain
+            for (std::size_t i = 0; i < coeff_modulus_size; i++)
+            {
+                util::ntt_negacyclic_harvey(destination.data(i * coeff_count), ntt_tables[i]);
+            }
+            //            std::cout << "After transforme to NTT domain:" << std::endl;
+
+            std::cout << std::endl;
+            destination.parms_id() = parms_id;
+            destination.scale() = scale;
+        }
+
+        template <
+            typename T, typename = std::enable_if_t<
+                            std::is_same<std::remove_cv_t<T>, double>::value ||
+                            std::is_same<std::remove_cv_t<T>, std::complex<double>>::value>>
+        void extract_vec2plaintext_internal(const Plaintext &plain, T *destination, MemoryPoolHandle pool)
+        {
+            // Verify parameters.
+            if (!is_valid_for(plain, context_))
+            {
+                throw std::invalid_argument("plain is not valid for encryption parameters");
+            }
+            if (!plain.is_ntt_form())
+            {
+                throw std::invalid_argument("plain is not in NTT form");
+            }
+            if (!destination)
+            {
+                throw std::invalid_argument("destination cannot be null");
+            }
+            if (!pool)
+            {
+                throw std::invalid_argument("pool is uninitialized");
+            }
+
+            auto &context_data = *context_.get_context_data(plain.parms_id());
+            auto &parms = context_data.parms();
+            std::size_t coeff_modulus_size = parms.coeff_modulus().size();
+            std::size_t coeff_count = parms.poly_modulus_degree();
+            std::size_t rns_poly_uint64_count = util::mul_safe(coeff_count, coeff_modulus_size);
+
+            auto ntt_tables = context_data.small_ntt_tables();
+
+            // Check that scale is positive and not too large
+            if (plain.scale() <= 0 ||
+                (static_cast<int>(log2(plain.scale())) >= context_data.total_coeff_modulus_bit_count()))
+            {
+                throw std::invalid_argument("scale out of bounds");
+            }
+
+            auto decryption_modulus = context_data.total_coeff_modulus();
+            auto upper_half_threshold = context_data.upper_half_threshold();
+            int logn = util::get_power_of_two(coeff_count);
+
+            // Quick sanity check
+            if ((logn < 0) || (coeff_count < SEAL_POLY_MOD_DEGREE_MIN) || (coeff_count > SEAL_POLY_MOD_DEGREE_MAX))
+            {
+                throw std::logic_error("invalid parameters");
+            }
+
+            double inv_scale = double(1.0) / plain.scale();
+
+            // Create mutable copy of input
+            auto plain_copy(util::allocate_uint(rns_poly_uint64_count, pool));
+            util::set_uint(plain.data(), rns_poly_uint64_count, plain_copy.get());
+
+            // std::cout << "Before transforme from NTT domain:" << std::endl;
+
+            // Transform each polynomial from NTT domain
+            for (std::size_t i = 0; i < coeff_modulus_size; i++)
+            {
+                util::inverse_ntt_negacyclic_harvey(plain_copy.get() + (i * coeff_count), ntt_tables[i]);
+            }
+            std::cout << "After transforme from NTT domain:" << std::endl;
+            for (size_t i = 0; i < coeff_count; i++)
+            {
+                if (plain_copy[i] != 0)
+                {
+                    std::stringstream hex_stream;
+                    hex_stream << std::hex << plain_copy[i];
+                    std::cout << "Coefficient " << i << ": " << hex_stream.str() << std::endl;
+                }
+            }
+            context_data.rns_tool()->base_q()->compose_array(plain_copy.get(), coeff_count, pool);
+            // Create floating-point representations of the multi-precision integer coefficients
+            double two_pow_64 = std::pow(2.0, 64);
+            auto res(util::allocate<std::complex<double>>(coeff_count, pool));
+            for (std::size_t i = 0; i < coeff_count; i++)
+            {
+                res[i] = 0.0;
+                if (util::is_greater_than_or_equal_uint(
+                        plain_copy.get() + (i * coeff_modulus_size), upper_half_threshold, coeff_modulus_size))
+                {
+                    double scaled_two_pow_64 = inv_scale;
+                    for (std::size_t j = 0; j < coeff_modulus_size; j++, scaled_two_pow_64 *= two_pow_64)
+                    {
+                        if (plain_copy[i * coeff_modulus_size + j] > decryption_modulus[j])
+                        {
+                            auto diff = plain_copy[i * coeff_modulus_size + j] - decryption_modulus[j];
+                            res[i] += diff ? static_cast<double>(diff) * scaled_two_pow_64 : 0.0;
+                        }
+                        else
+                        {
+                            auto diff = decryption_modulus[j] - plain_copy[i * coeff_modulus_size + j];
+                            res[i] -= diff ? static_cast<double>(diff) * scaled_two_pow_64 : 0.0;
+                        }
+                    }
+                }
+                else
+                {
+                    double scaled_two_pow_64 = inv_scale;
+                    for (std::size_t j = 0; j < coeff_modulus_size; j++, scaled_two_pow_64 *= two_pow_64)
+                    {
+                        auto curr_coeff = plain_copy[i * coeff_modulus_size + j];
+                        res[i] += curr_coeff ? static_cast<double>(curr_coeff) * scaled_two_pow_64 : 0.0;
+                    }
+                }
+
+                // Scaling instead incorporated above; this can help in cases
+                // where otherwise pow(two_pow_64, j) would overflow due to very
+                // large coeff_modulus_size and very large scale
+                // res[i] = res_accum * inv_scale;
+            }
+
+            for (std::size_t i = 0; i < slots_; i++)
+            {
+                destination[i] = from_complex<T>(res[static_cast<std::size_t>(matrix_reps_index_map_[i])]);
+            }
+            std::cout << "Result vector:" << std::endl;
+            for (size_t i = 0; i < coeff_count; i++)
+            {
+                std::stringstream hex_stream;
+                hex_stream << destination[i];
+                std::cout << "Coefficient " << i << ": " << hex_stream.str() << std::endl;
+            }
+        }
+
         template <
             typename T, typename = std::enable_if_t<
                             std::is_same<std::remove_cv_t<T>, double>::value ||
@@ -512,7 +795,7 @@ namespace seal
             int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max<>(max_coeff, 1.0)))) + 1;
             if (max_coeff_bit_count >= context_data.total_coeff_modulus_bit_count())
             {
-                // throw std::invalid_argument("encoded values are too large");
+                throw std::invalid_argument("encoded values are too large");
             }
 
             double two_pow_64 = std::pow(2.0, 64);

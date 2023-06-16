@@ -29,6 +29,7 @@ if(SEAL_BUILD_EXAMPLES)
             ${CMAKE_CURRENT_LIST_DIR}/6_rotation.cpp
             ${CMAKE_CURRENT_LIST_DIR}/7_serialization.cpp
             ${CMAKE_CURRENT_LIST_DIR}/8_performance.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/9_cheetah_conv.cpp
     )
 
     if(TARGET SEAL::seal)

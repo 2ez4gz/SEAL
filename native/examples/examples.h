@@ -15,6 +15,9 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <seal/secretkey.h>
+#include <seal/util/polyarithsmallmod.h>
+#include <seal/util/rlwe.h>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -35,6 +38,8 @@ void example_rotation();
 void example_serialization();
 
 void example_performance_test();
+
+void conv_performance_test();
 
 /*
 Helper function: Prints the name of the example in a fancy banner.
